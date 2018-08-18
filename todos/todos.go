@@ -1,9 +1,7 @@
 package todos
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -12,10 +10,11 @@ import (
 	uuid "github.com/satori/go.uuid"
 )
 
-func createUUID() (string, error) {
-	b := uuid.NewV4()
-	s := string(b[:])
-	return s, nil
+const TableName = "Todos"
+
+func createUUID() string {
+	uuid := uuid.NewV4()
+	return uuid.String()
 }
 
 type Todo struct {
@@ -24,27 +23,52 @@ type Todo struct {
 	Description string `json:"description"`
 }
 
-func GetTodo(id string) (Todo, error) {
-	sess := session.Must(session.NewSession())
-	svc := dynamodb.New(sess)
-	todo := Todo{}
+func GetTodos() ([]Todo, error) {
+	var todos []Todo
+	svc := dynamodb.New(session.New())
 
-	result, err := svc.GetItem(&dynamodb.GetItemInput{
-		TableName: aws.String(os.Getenv("TABLE_NAME")),
+	input := &dynamodb.ScanInput{
+		TableName: aws.String(TableName),
+	}
+
+	result, err := svc.Scan(input)
+	if err != nil {
+		fmt.Errorf("failed to make Query API call, %v", err)
+		return todos, err
+	}
+
+	dynamodbattribute.UnmarshalListOfMaps(result.Items, &todos)
+	if err != nil {
+		fmt.Errorf("failed to unmarshal Query result items, %v", err)
+		return todos, err
+	}
+
+	return todos, nil
+}
+
+func GetTodo(id string) (Todo, error) {
+	todo := Todo{}
+	svc := dynamodb.New(session.New())
+
+	input := &dynamodb.GetItemInput{
 		Key: map[string]*dynamodb.AttributeValue{
-			"id": {
-				N: aws.String(id),
+			"Id": {
+				S: aws.String(id),
 			},
 		},
-	})
+		TableName: aws.String(TableName),
+	}
+
+	result, err := svc.GetItem(input)
 
 	if err != nil {
 		fmt.Println(err.Error())
 		return todo, err
 	}
 
-	// Unmarshall the result in to an Item
+	// Unmarshall the result in to a Todo
 	err = dynamodbattribute.UnmarshalMap(result.Item, &todo)
+
 	if err != nil {
 		fmt.Println(err.Error())
 		return todo, err
@@ -54,14 +78,13 @@ func GetTodo(id string) (Todo, error) {
 }
 
 func DeleteTodo(id string) error {
-	sess := session.Must(session.NewSession())
-	svc := dynamodb.New(sess)
+	svc := dynamodb.New(session.New())
 
 	input := &dynamodb.DeleteItemInput{
-		TableName: aws.String(os.Getenv("TABLE_NAME")),
+		TableName: aws.String(TableName),
 		Key: map[string]*dynamodb.AttributeValue{
 			"id": {
-				N: aws.String(id),
+				S: aws.String(id),
 			},
 		},
 	}
@@ -75,32 +98,70 @@ func DeleteTodo(id string) error {
 }
 
 func PostTodo(description string) (Todo, error) {
-	sess := session.Must(session.NewSession())
-	svc := dynamodb.New(sess)
+	svc := dynamodb.New(session.New())
+	id := createUUID()
 
-	id, err := createUUID()
+	fmt.Println("id", id)
 
 	// Marshall the request body
 	todo := Todo{
-		Description: "",
+		Description: description,
 		ID:          id,
 		Completed:   false,
 	}
-	json.Unmarshal([]byte(description), &todo)
 
-	// Marshall the Item into a Map DynamoDB can deal with
-	av, err := dynamodbattribute.MarshalMap(todo)
+	input := &dynamodb.PutItemInput{
+		Item: map[string]*dynamodb.AttributeValue{
+			"Description": {
+				S: aws.String(todo.Description),
+			},
+			"Id": {
+				S: aws.String(todo.ID),
+			},
+			"Completed": {
+				BOOL: aws.Bool(todo.Completed),
+			},
+		},
+		ReturnConsumedCapacity: aws.String("TOTAL"),
+		TableName:              aws.String(TableName),
+	}
+
+	_, err := svc.PutItem(input)
+
 	if err != nil {
-		fmt.Println("Got error marshalling map:")
 		fmt.Println(err.Error())
 		return todo, err
 	}
 
-	// Create Item in table and return
-	input := &dynamodb.PutItemInput{
-		Item:      av,
-		TableName: aws.String(os.Getenv("TABLE_NAME")),
+	return todo, nil
+}
+
+func CompleteTodo(id string, completed bool) error {
+	sess := session.Must(session.NewSession())
+	svc := dynamodb.New(sess)
+
+	input := &dynamodb.UpdateItemInput{
+		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+			":b": {
+				BOOL: aws.Bool(completed),
+			},
+		},
+		TableName: aws.String(TableName),
+		Key: map[string]*dynamodb.AttributeValue{
+			"Id": {
+				S: aws.String(id),
+			},
+		},
+		ReturnValues:     aws.String("UPDATED_NEW"),
+		UpdateExpression: aws.String("set info.Completed = :b"),
 	}
-	_, err = svc.PutItem(input)
-	return todo, err
+
+	_, err := svc.UpdateItem(input)
+
+	if err != nil {
+		fmt.Println(err.Error())
+		return err
+	}
+
+	return nil
 }
